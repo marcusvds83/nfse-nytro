@@ -47,7 +47,6 @@
       <nav class="topbar-tabs" id="main-tabs">
         <button class="tab-btn active" data-tab="painel">Painel</button>
         <button class="tab-btn" data-tab="docs">Documentacao</button>
-        <button class="tab-btn" data-tab="impostos">Impostos</button>
         <button class="tab-btn" data-tab="clientes">Clientes</button>
         <button class="tab-btn" data-tab="setup">Setup</button>
         <button class="tab-btn" data-tab="campos">Campos Odoo</button>
@@ -363,8 +362,7 @@
                 <tr><td>GET</td><td><code>/api/v1/nfse/admin/campos/status</code></td><td>Verificar campos x_nytro_*</td></tr>
                 <tr><td>POST</td><td><code>/api/v1/nfse/admin/campos/criar</code></td><td>Criar campos ausentes</td></tr>
                 <tr><td>POST</td><td><code>/api/v1/nfse/admin/campos/server-actions</code></td><td>Criar Server Actions</td></tr>
-                <tr><td>GET</td><td><code>/api/v1/nfse/admin/impostos/produtos</code></td><td>Listar produtos com impostos</td></tr>
-                <tr><td>POST</td><td><code>/api/v1/nfse/admin/impostos/push</code></td><td>Push impostos ao Odoo</td></tr>
+
               </tbody>
             </table>
           </div>
@@ -415,51 +413,6 @@
     </main>
   </div>
 
-  <!-- Tab: Impostos -->
-  <div id="tab-impostos" class="tab-content hidden">
-    <main class="main-content">
-      <div class="doc-container">
-        <h2 class="doc-title">Configurador de Impostos</h2>
-        <p class="doc-subtitle">Configure os impostos e envie diretamente ao Odoo</p>
-
-        <!-- Config Atual -->
-        <section class="doc-section">
-          <h3 class="doc-h3">Configuracao Atual do Middleware</h3>
-          <div class="doc-body" id="impostos-config-atual">
-            <p>Carregando...</p>
-          </div>
-        </section>
-
-        <!-- Produtos -->
-        <section class="doc-section">
-          <h3 class="doc-h3">Produtos — Impostos por Produto</h3>
-          <div class="doc-body">
-            <p class="doc-hint">Selecione os produtos e configure os impostos individuais. Os valores serao salvos nos campos x_nytro_* do produto.</p>
-            <div style="margin-bottom:12px">
-              <button class="btn-primary" id="btn-carregar-produtos" style="padding:8px 16px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-weight:600">Carregar Produtos do Odoo</button>
-            </div>
-            <div id="impostos-produtos-lista"></div>
-            <div id="impostos-push-barra" style="display:none;margin-top:16px;padding:12px;background:var(--surface);border-radius:8px;border:1px solid var(--border)">
-              <button class="btn-primary" id="btn-push-impostos" style="padding:10px 20px;border-radius:6px;border:none;background:#2563eb;color:#fff;cursor:pointer;font-weight:600">Enviar Impostos ao Odoo</button>
-              <span id="impostos-push-status" style="margin-left:12px;color:var(--muted)"></span>
-            </div>
-          </div>
-        </section>
-
-        <!-- IM Empresa -->
-        <section class="doc-section">
-          <h3 class="doc-h3">Inscricao Municipal da Empresa</h3>
-          <div class="doc-body">
-            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-              <input type="text" id="inp-im-empresa" placeholder="Ex: 080212854094" style="padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg);width:200px">
-              <button class="btn-primary" id="btn-salvar-im" style="padding:8px 16px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-weight:600">Salvar IM no Odoo</button>
-              <span id="im-salvar-status" style="color:var(--muted)"></span>
-            </div>
-          </div>
-        </section>
-      </div>
-    </main>
-  </div>
 
   <!-- Tab: Setup -->
   <div id="tab-setup" class="tab-content hidden">
@@ -542,7 +495,6 @@ FIREBASE_CERT_DOC_ID=cliente-a1</div>
               <li><strong>Aba Campos Odoo</strong>: clique <b>"Verificar Campos"</b> para checar, depois <b>"Criar Campos Ausentes"</b>. Isso cria os 16 campos x_nytro_* no Odoo.</li>
               <li><strong>Aba Campos Odoo</strong>: clique <b>"Criar Server Actions"</b>. Isso cria as acoes de Emitir e Cancelar NFS-e no Odoo.</li>
               <li><strong>No Odoo</strong>: adicione os botoes das Server Actions na view de fatura. Va em Configuracao → Tecnico → Server Actions, encontre as acoes criadas, e adicione na view de <code>account.move</code>.</li>
-              <li><strong>Aba Impostos</strong>: configure os impostos por produto (codigo tributacao, NBS, aliquota ISS, retencao) e clique <b>"Enviar ao Odoo"</b>.</li>
               <li><strong>Testar em homologacao</strong> (<code>NFSE_TP_AMB=2</code>): crie uma fatura de teste, clique em Emitir NFS-e, verifique os logs e o resultado no gov.br.</li>
               <li><strong>Mudar para producao</strong>: altere <code>NFSE_TP_AMB=1</code> nas variaveis de ambiente no Render. Reinicie o servico.</li>
             </ol>
@@ -657,7 +609,6 @@ else:
               <li>Faça o upload da logo do novo cliente via <code>POST /api/v1/nfse/certificado/logo</code></li>
               <li>Clique em <b>"Verificar Campos"</b> nesta aba e depois <b>"Criar Campos Ausentes"</b></li>
               <li>Clique em <b>"Criar Server Actions"</b> para gerar os botoes de emitir/cancelar</li>
-              <li>Configure os impostos na aba <b>"Impostos"</b> (aliquota, NBS, codigo tributacao)</li>
               <li>Teste com uma fatura de homologacao (<code>NFSE_TP_AMB=2</code>)</li>
             </ol>
           </div>
