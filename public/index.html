@@ -36,12 +36,19 @@
           <img src="/logo-nytro.png" alt="Nytro" class="topbar-logo-img">
           <span class="logo-text">Nytro Fiscal Cloud</span>
         </div>
+        <!-- Seletor de Empresa (Admin) -->
+        <div class="company-selector" id="company-selector">
+          <select id="sel-empresa">
+            <option value="" selected>Nytro (proprio)</option>
+          </select>
+        </div>
         <div class="topbar-env" id="env-badge">HOMOLOGACAO</div>
       </div>
       <nav class="topbar-tabs" id="main-tabs">
         <button class="tab-btn active" data-tab="painel">Painel</button>
         <button class="tab-btn" data-tab="docs">Documentacao</button>
         <button class="tab-btn" data-tab="impostos">Impostos</button>
+        <button class="tab-btn" data-tab="clientes">Clientes</button>
         <button class="tab-btn" data-tab="setup">Setup</button>
         <button class="tab-btn" data-tab="campos">Campos Odoo</button>
       </nav>
@@ -654,6 +661,52 @@ else:
               <li>Teste com uma fatura de homologacao (<code>NFSE_TP_AMB=2</code>)</li>
             </ol>
           </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <!-- Tab: Clientes (Admin) -->
+  <div id="tab-clientes" class="tab-content hidden">
+    <main class="main-content">
+      <div class="doc-container">
+        <h2 class="doc-title">Painel de Clientes</h2>
+        <p class="doc-subtitle">Gerencie os clientes Nytro — visualize emissões e status de conexão</p>
+
+        <!-- Adicionar Cliente -->
+        <section class="doc-section">
+          <h3 class="doc-h3" style="cursor:default">Adicionar Novo Cliente</h3>
+          <div class="doc-body">
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;max-width:700px">
+              <div><label style="font-size:0.75rem;color:var(--text-muted);display:block;margin-bottom:3px">Nome *</label><input type="text" id="cli-nome" placeholder="Nome da empresa" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg)"></div>
+              <div><label style="font-size:0.75rem;color:var(--text-muted);display:block;margin-bottom:3px">CNPJ *</label><input type="text" id="cli-cnpj" placeholder="00.000.000/0000-00" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg)"></div>
+              <div><label style="font-size:0.75rem;color:var(--text-muted);display:block;margin-bottom:3px">Odoo URL</label><input type="text" id="cli-odoo-url" placeholder="https://cliente.odoo.com" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg)"></div>
+              <div><label style="font-size:0.75rem;color:var(--text-muted);display:block;margin-bottom:3px">Odoo DB</label><input type="text" id="cli-odoo-db" placeholder="cliente-production-12345" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg)"></div>
+              <div><label style="font-size:0.75rem;color:var(--text-muted);display:block;margin-bottom:3px">Odoo E-mail</label><input type="text" id="cli-odoo-user" placeholder="admin@cliente.com" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg)"></div>
+              <div><label style="font-size:0.75rem;color:var(--text-muted);display:block;margin-bottom:3px">Odoo API Key</label><input type="password" id="cli-odoo-key" placeholder="Chave de API Odoo" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg)"></div>
+              <div><label style="font-size:0.75rem;color:var(--text-muted);display:block;margin-bottom:3px">Render URL</label><input type="text" id="cli-render-url" placeholder="https://nfse-cliente.onrender.com" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg)"></div>
+              <div><label style="font-size:0.75rem;color:var(--text-muted);display:block;margin-bottom:3px">Render API Key</label><input type="password" id="cli-render-key" placeholder="API Key do Render" style="width:100%;padding:8px 12px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--fg)"></div>
+            </div>
+            <div style="margin-top:14px;display:flex;gap:8px">
+              <button id="btn-salvar-cliente" style="padding:10px 24px;border-radius:6px;border:none;background:var(--accent);color:#fff;cursor:pointer;font-weight:600;font-size:0.85rem">Salvar Cliente</button>
+              <button id="btn-cancelar-cliente" style="padding:10px 24px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--fg);cursor:pointer;font-size:0.85rem;display:none">Cancelar</button>
+              <span id="cli-salvar-status" style="align-self:center;color:var(--text-muted);font-size:0.82rem"></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- Lista de Clientes -->
+        <section class="doc-section">
+          <h3 class="doc-h3" style="cursor:default">Clientes Cadastrados</h3>
+          <div class="doc-body">
+            <div id="clientes-lista"><p>Carregando...</p></div>
+          </div>
+        </section>
+
+        <!-- Detalhe do Cliente (ao selecionar) -->
+        <section class="doc-section" id="clientes-detalhe-section" style="display:none">
+          <h3 class="doc-h3" style="cursor:default" id="clientes-detalhe-titulo">Detalhes do Cliente</h3>
+          <div class="doc-body" id="clientes-detalhe-body"></div>
         </section>
       </div>
     </main>

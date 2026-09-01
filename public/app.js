@@ -12,12 +12,16 @@
   let currentNfse = null;
   let refreshTimer = null;
   let sefinTimer = null;
+  let clientesCache = [];
+  let selectedClientId = null; // null = Nytro (proprio)
+  let editingClientId = null;
 
   // --- URL Routing ---
   const TAB_PATHS = {
     painel: '/painel',
     docs: '/documentacao',
     impostos: '/impostos',
+    clientes: '/clientes',
     setup: '/setup',
     campos: '/campo-odoo'
   };
@@ -138,21 +142,33 @@
   // --- Load Dashboard ---
   async function loadDashboard() {
     try {
-      const r = await apiFetch('/api/v1/nfse/dashboard');
-      if (r.status === 401) {
-        showAuth();
-        return;
+      let data;
+      if (selectedClientId) {
+        // Busca dados do cliente selecionado
+        const r = await fetch('/api/v1/admin/clientes/' + selectedClientId + '/dashboard', {
+          method: 'POST', headers: { 'X-Api-Key': API_KEY }
+        });
+        if (r.status === 401) { showAuth(); return; }
+        data = await r.json();
+      } else {
+        // Nytro (proprio) — dashboard normal
+        const r = await apiFetch('/api/v1/nfse/dashboard');
+        if (r.status === 401) { showAuth(); return; }
+        data = await r.json();
       }
-      const data = await r.json();
 
       // Environment badge
       const badge = $('#env-badge');
-      if (data.ambiente === 'PRODUCAO') {
+      if (selectedClientId) {
+        badge.textContent = data.cliente_nome || 'CLIENTE';
+        badge.className = 'topbar-env';
+        badge.style.background = 'var(--info-dim)'; badge.style.color = 'var(--info)'; badge.style.border = '1px solid rgba(59,130,246,0.3)';
+      } else if (data.ambiente === 'PRODUCAO') {
         badge.textContent = 'PRODUCAO';
-        badge.className = 'topbar-env prod';
+        badge.className = 'topbar-env prod'; badge.style.background = ''; badge.style.color = ''; badge.style.border = '';
       } else {
         badge.textContent = 'HOMOLOGACAO';
-        badge.className = 'topbar-env hom';
+        badge.className = 'topbar-env hom'; badge.style.background = ''; badge.style.color = ''; badge.style.border = '';
       }
 
       // Odoo status
@@ -477,7 +493,7 @@
   // --- Tab Navigation + URL Routing ---
   function initTabs() {
     const tabs = document.querySelectorAll('#main-tabs .tab-btn');
-    const panels = { painel: $('#tab-painel'), docs: $('#tab-docs'), impostos: $('#tab-impostos'), setup: $('#tab-setup'), campos: $('#tab-campos') };
+    const panels = { painel: $('#tab-painel'), docs: $('#tab-docs'), impostos: $('#tab-impostos'), clientes: $('#tab-clientes'), setup: $('#tab-setup'), campos: $('#tab-campos') };
 
     function switchTab(tabName, pushState) {
       // Update active button
@@ -501,6 +517,7 @@
       // Load tab-specific data
       if (tabName === 'docs') loadDocsConfig();
       if (tabName === 'impostos') loadImpostosConfig();
+      if (tabName === 'clientes') loadClientes();
       if (tabName === 'setup') loadSetupStatus();
       // Update URL
       if (pushState && TAB_PATHS[tabName]) {
@@ -569,8 +586,14 @@
     const btn = $('#btn-carregar-produtos'); btn.textContent = 'Carregando...'; btn.disabled = true;
     try {
       const r = await apiFetch('/api/v1/nfse/admin/impostos/produtos');
+      if (!r.ok) {
+        const errData = await r.json().catch(() => ({ erro: 'HTTP ' + r.status }));
+        alert('Erro: ' + (errData.erro || 'HTTP ' + r.status));
+        btn.textContent = 'Carregar Produtos do Odoo'; btn.disabled = false;
+        return;
+      }
       const d = await r.json();
-      if (d.erro) { alert(d.erro); return; }
+      if (d.erro) { alert(d.erro); btn.textContent = 'Carregar Produtos do Odoo'; btn.disabled = false; return; }
       produtosCache = d.produtos || [];
       if (!produtosCache.length) { $('#impostos-produtos-lista').innerHTML = '<p style="color:var(--text-muted)">Nenhum produto encontrado.</p>'; return; }
       const html = produtosCache.map(p => {
@@ -733,11 +756,224 @@
     btn.disabled = false; btn.textContent = 'Enviar Logo';
   });
 
+  // --- Company Selector ---
+  async function loadCompanySelector() {
+    try {
+      const r = await apiFetch('/api/v1/admin/clientes');
+      if (!r.ok) return;
+      const d = await r.json();
+      clientesCache = d.clientes || [];
+      const sel = $('#sel-empresa');
+      // Preserva selecao atual
+      const curVal = sel.value;
+      sel.innerHTML = '<option value="">Nytro (proprio)</option>';
+      clientesCache.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = c.nome;
+        sel.appendChild(opt);
+      });
+      // Restaura selecao
+      if (curVal && clientesCache.find(c => c.id === curVal)) {
+        sel.value = curVal;
+      } else {
+        sel.value = '';
+        selectedClientId = null;
+      }
+    } catch (e) { console.error('[Clientes] load error:', e); }
+  }
+
+  $('#sel-empresa').addEventListener('change', async function() {
+    selectedClientId = this.value || null;
+    // Limpa cache de NFS-e ao trocar
+    allNfses = [];
+    $('#table-body').innerHTML = '<tr class="tr-empty"><td colspan="9"><div class="empty-state"><p>Carregando dados...</p></div></td></tr>';
+    // Se estiver no painel, recarrega
+    const activeTab = document.querySelector('#main-tabs .tab-btn.active');
+    if (activeTab && activeTab.dataset.tab === 'painel') {
+      loadDashboard();
+    }
+  });
+
+  // --- Clientes Tab ---
+  async function loadClientes() {
+    await loadCompanySelector(); // garante lista atualizada
+    const lista = $('#clientes-lista');
+    if (!clientesCache.length) {
+      lista.innerHTML = '<p style="color:var(--text-muted)">Nenhum cliente cadastrado ainda.</p>';
+      return;
+    }
+    lista.innerHTML = clientesCache.map(c => {
+      const cnpjMasked = maskCnpj(c.cnpj);
+      const hasOdoo = !!(c.odoo_url && c.odoo_db);
+      const hasRender = !!c.render_url;
+      return '<div class="cli-card" data-id="' + c.id + '">' +
+        '<div class="cli-card-main">' +
+          '<div class="cli-card-nome">' + esc(c.nome) + '</div>' +
+          '<div class="cli-card-cnpj">' + (cnpjMasked || c.cnpj) + '</div>' +
+          '<div class="cli-card-meta">' +
+            '<div class="cli-meta-item"><span>Odoo: </span><strong>' + (hasOdoo ? esc(c.odoo_url) : '<em style="color:var(--text-muted)">nao configurado</em>') + '</strong></div>' +
+            '<div class="cli-meta-item"><span>Render: </span><strong>' + (hasRender ? esc(c.render_url) : '<em style="color:var(--text-muted)">nao configurado</em>') + '</strong></div>' +
+            (c.odoo_db ? '<div class="cli-meta-item"><span>DB: </span><strong>' + esc(c.odoo_db) + '</strong></div>' : '') +
+          '</div>' +
+          '<div class="cli-status-row" id="cli-status-' + c.id + '">' +
+            (hasOdoo ? '<span class="cli-status-chip" style="opacity:0.4"><span class="chip-dot"></span>Odoo --</span>' : '') +
+            (hasRender ? '<span class="cli-status-chip" style="opacity:0.4"><span class="chip-dot"></span>Render --</span>' : '') +
+          '</div>' +
+        '</div>' +
+        '<div class="cli-card-actions">' +
+          (hasOdoo ? '<button class="cli-btn primary" onclick="window._cliVerNfses(\'' + c.id + '\')">Ver NFS-e</button>' : '') +
+          '<button class="cli-btn" onclick="window._cliCheckStatus(\'' + c.id + '\')">Check</button>' +
+          '<button class="cli-btn" onclick="window._cliEdit(\'' + c.id + '\')">Editar</button>' +
+          '<button class="cli-btn danger" onclick="window._cliDelete(\'' + c.id + '\')">Excluir</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }
+
+  // Ver NFS-e do cliente (seleciona no seletor e vai pro painel)
+  window._cliVerNfses = function(id) {
+    selectedClientId = id;
+    $('#sel-empresa').value = id;
+    // Troca para tab painel
+    const tabBtn = document.querySelector('#main-tabs .tab-btn[data-tab="painel"]');
+    if (tabBtn) tabBtn.click();
+  };
+
+  // Check status do cliente
+  window._cliCheckStatus = async function(id) {
+    const statusRow = document.getElementById('cli-status-' + id);
+    if (!statusRow) return;
+    statusRow.innerHTML = '<span class="cli-status-chip warning"><span class="chip-dot"></span>Verificando...</span>';
+    try {
+      const r = await fetch('/api/v1/admin/clientes/' + id + '/check', {
+        method: 'POST', headers: { 'X-Api-Key': API_KEY }
+      });
+      const d = await r.json();
+      let html = '';
+      if (d.odoo) {
+        html += '<span class="cli-status-chip ' + (d.odoo.online ? 'online' : 'offline') + '"><span class="chip-dot"></span>Odoo ' + (d.odoo.online ? d.odoo.latency_ms + 'ms' : d.odoo.erro.substring(0, 30)) + '</span>';
+      }
+      if (d.render) {
+        html += '<span class="cli-status-chip ' + (d.render.online ? 'online' : 'offline') + '"><span class="chip-dot"></span>Render ' + (d.render.online ? 'OK' : d.render.erro.substring(0, 30)) + '</span>';
+      }
+      statusRow.innerHTML = html;
+    } catch (e) {
+      statusRow.innerHTML = '<span class="cli-status-chip offline"><span class="chip-dot"></span>Erro</span>';
+    }
+  };
+
+  // Editar cliente
+  window._cliEdit = function(id) {
+    const c = clientesCache.find(cl => cl.id === id);
+    if (!c) return;
+    editingClientId = id;
+    $('#cli-nome').value = c.nome || '';
+    $('#cli-cnpj').value = c.cnpj || '';
+    $('#cli-odoo-url').value = c.odoo_url || '';
+    $('#cli-odoo-db').value = c.odoo_db || '';
+    $('#cli-odoo-user').value = c.odoo_user || '';
+    $('#cli-odoo-key').value = '';
+    $('#cli-render-url').value = c.render_url || '';
+    $('#cli-render-key').value = '';
+    $('#btn-salvar-cliente').textContent = 'Atualizar Cliente';
+    $('#btn-cancelar-cliente').style.display = 'inline-block';
+    $('#cli-nome').focus();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  // Excluir cliente
+  window._cliDelete = async function(id) {
+    const c = clientesCache.find(cl => cl.id === id);
+    if (!c) return;
+    if (!confirm('Excluir cliente "' + c.nome + '"?')) return;
+    try {
+      const r = await fetch('/api/v1/admin/clientes/' + id, {
+        method: 'DELETE', headers: { 'X-Api-Key': API_KEY }
+      });
+      const d = await r.json();
+      if (d.sucesso) {
+        // Se era o selecionado, volta pra Nytro
+        if (selectedClientId === id) {
+          selectedClientId = null;
+          $('#sel-empresa').value = '';
+        }
+        loadClientes();
+        loadCompanySelector();
+      } else { alert('Erro: ' + (d.erro || '')); }
+    } catch (e) { alert('Erro: ' + e.message); }
+  };
+
+  // Salvar/Atualizar cliente
+  $('#btn-salvar-cliente').addEventListener('click', async () => {
+    const nome = $('#cli-nome').value.trim();
+    const cnpj = $('#cli-cnpj').value.trim();
+    if (!nome || !cnpj) { alert('Nome e CNPJ sao obrigatorios.'); return; }
+
+    const body = {
+      nome, cnpj,
+      odoo_url: $('#cli-odoo-url').value.trim(),
+      odoo_db: $('#cli-odoo-db').value.trim(),
+      odoo_user: $('#cli-odoo-user').value.trim(),
+      odoo_api_key: $('#cli-odoo-key').value.trim() || undefined,
+      render_url: $('#cli-render-url').value.trim(),
+      render_api_key: $('#cli-render-key').value.trim() || undefined,
+    };
+
+    const btn = $('#btn-salvar-cliente'); btn.disabled = true;
+    const status = $('#cli-salvar-status');
+    try {
+      let r;
+      if (editingClientId) {
+        r = await fetch('/api/v1/admin/clientes/' + editingClientId, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_KEY },
+          body: JSON.stringify(body)
+        });
+      } else {
+        r = await fetch('/api/v1/admin/clientes', {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Api-Key': API_KEY },
+          body: JSON.stringify(body)
+        });
+      }
+      const d = await r.json();
+      if (d.sucesso) {
+        status.textContent = editingClientId ? 'Cliente atualizado!' : 'Cliente salvo!';
+        status.style.color = 'var(--accent)';
+        // Limpa form
+        $('#cli-nome').value = ''; $('#cli-cnpj').value = '';
+        $('#cli-odoo-url').value = ''; $('#cli-odoo-db').value = '';
+        $('#cli-odoo-user').value = ''; $('#cli-odoo-key').value = '';
+        $('#cli-render-url').value = ''; $('#cli-render-key').value = '';
+        editingClientId = null;
+        btn.textContent = 'Salvar Cliente';
+        $('#btn-cancelar-cliente').style.display = 'none';
+        loadClientes();
+        loadCompanySelector();
+      } else {
+        status.textContent = 'Erro: ' + (d.erro || '');
+        status.style.color = 'var(--danger)';
+      }
+    } catch (e) { status.textContent = 'Erro: ' + e.message; status.style.color = 'var(--danger)'; }
+    btn.disabled = false;
+  });
+
+  // Cancelar edicao
+  $('#btn-cancelar-cliente').addEventListener('click', () => {
+    editingClientId = null;
+    $('#btn-salvar-cliente').textContent = 'Salvar Cliente';
+    $('#btn-cancelar-cliente').style.display = 'none';
+    $('#cli-nome').value = ''; $('#cli-cnpj').value = '';
+    $('#cli-odoo-url').value = ''; $('#cli-odoo-db').value = '';
+    $('#cli-odoo-user').value = ''; $('#cli-odoo-key').value = '';
+    $('#cli-render-url').value = ''; $('#cli-render-key').value = '';
+    $('#cli-salvar-status').textContent = '';
+  });
+
   // --- Start ---
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => { init(); initTabs(); });
+    document.addEventListener('DOMContentLoaded', () => { init(); initTabs(); loadCompanySelector(); });
   } else {
-    init(); initTabs();
+    init(); initTabs(); loadCompanySelector();
   }
 
 })();

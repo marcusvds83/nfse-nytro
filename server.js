@@ -31,6 +31,7 @@ const certRoutes = require('./routes/nfse-cert');
 const nfseRoutes = require('./routes/nfse');
 const dashboardRoutes = require('./routes/dashboard');
 const adminToolsRoutes = require('./routes/admin-tools');
+const adminClientesRoutes = require('./routes/admin-clientes');
 const { processPendingEmissions } = require('./services/nfse-odoo-emit');
 
 const app = express();
@@ -60,6 +61,7 @@ app.use('/api/v1/nfse/certificado', certRoutes);
 app.use('/api/v1/nfse', nfseRoutes);
 app.use('/api/v1/nfse', dashboardRoutes);
 app.use('/api/v1/nfse', adminToolsRoutes);
+app.use('/api/v1/admin', adminClientesRoutes);
 
 // === Polling de emissões pendentes ===
 let pollingTimer = null;
