@@ -1,7 +1,9 @@
 /**
  * routes/admin-clientes.js — Gestao de Clientes Nytro (Admin)
  * =================================================================
- * Apenas para o admin Nytro gerenciar seus clientes.
+ * Dados persistidos no Firebase Firestore (colecao "clientes").
+ * API keys dos clientes sao cifradas (AES-256-GCM).
+ *
  * GET  /api/v1/admin/clientes              — Listar clientes
  * POST /api/v1/admin/clientes              — Criar cliente
  * PUT  /api/v1/admin/clientes/:id          — Atualizar cliente
@@ -13,11 +15,117 @@
 
 const express = require('express');
 const router = express.Router();
-const fs = require('fs');
-const path = require('path');
+const crypto = require('crypto');
 const xmlrpc = require('xmlrpc');
+const config = require('../config');
 
-const CLIENTES_FILE = path.join(__dirname, '..', 'data', 'clientes.json');
+// === Firebase Init (reaproveita mesma config do certificado) ===
+let db = null;
+let fbReady = false;
+
+function initFirebase() {
+  if (fbReady) return;
+  if (!config.firebase.project_id || !config.firebase.client_email || !config.firebase.private_key) {
+    console.warn('[ADMIN-CLIENTES] Firebase nao configurado.');
+    return;
+  }
+  try {
+    const admin = require('firebase-admin');
+    if (admin.apps.length === 0) {
+      admin.initializeApp({
+        credential: admin.credential.cert({
+          projectId: config.firebase.project_id,
+          privateKey: config.firebase.private_key,
+          clientEmail: config.firebase.client_email,
+        }),
+      });
+    }
+    db = admin.firestore();
+    fbReady = true;
+    console.log('[ADMIN-CLIENTES] Firebase Firestore inicializado (colecao: clientes).');
+  } catch (e) {
+    console.error('[ADMIN-CLIENTES] Falha ao inicializar Firebase:', e.message);
+  }
+}
+
+// === Cifragem AES-256-GCM (mesma logica do firebase-cert.js) ===
+function deriveKey() {
+  const base = process.env.API_KEY || 'nytro-nfse-local-kek';
+  return crypto.createHash('sha256').update(String(base)).digest();
+}
+
+function encrypt(text) {
+  if (!text) return '';
+  const iv = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', deriveKey(), iv);
+  const enc = Buffer.concat([c.update(String(text), 'utf8'), c.final()]);
+  return Buffer.concat([iv, c.getAuthTag(), enc]).toString('base64');
+}
+
+function decrypt(blob) {
+  if (!blob) return '';
+  try {
+    const buf = Buffer.from(String(blob), 'base64');
+    if (buf.length < 29) return '';
+    const iv = buf.slice(0, 12);
+    const tag = buf.slice(12, 28);
+    const d = crypto.createDecipheriv('aes-256-gcm', deriveKey(), iv);
+    d.setAuthTag(tag);
+    return Buffer.concat([d.update(buf.slice(28)), d.final()]).toString('utf8');
+  } catch (e) {
+    console.warn('[ADMIN-CLIENTES] Falha ao decriptar campo:', e.message);
+    return '';
+  }
+}
+
+const COLLECTION = 'clientes';
+
+// === Firestore Helpers ===
+async function getCliente(id) {
+  const snap = await db.collection(COLLECTION).doc(id).get();
+  if (!snap.exists) return null;
+  const d = snap.data();
+  d.id = snap.id;
+  d.odoo_api_key = decrypt(d.odoo_api_key_enc);
+  d.render_api_key = decrypt(d.render_api_key_enc);
+  delete d.odoo_api_key_enc;
+  delete d.render_api_key_enc;
+  return d;
+}
+
+async function getAllClientes() {
+  const snap = await db.collection(COLLECTION).orderBy('criado_em', 'desc').get();
+  return snap.docs.map(doc => {
+    const d = doc.data();
+    d.id = doc.id;
+    return d;
+  });
+}
+
+function safeFields(c) {
+  return {
+    id: c.id, nome: c.nome, cnpj: c.cnpj,
+    odoo_url: c.odoo_url, odoo_db: c.odoo_db, odoo_user: c.odoo_user,
+    render_url: c.render_url,
+    criado_em: c.criado_em, atualizado_em: c.atualizado_em,
+  };
+}
+
+function clienteToDoc(body, id) {
+  const now = new Date().toISOString();
+  return {
+    nome: body.nome || '',
+    cnpj: (body.cnpj || '').replace(/\D/g, ''),
+    odoo_url: (body.odoo_url || '').replace(/\/+$/, ''),
+    odoo_db: body.odoo_db || '',
+    odoo_user: body.odoo_user || '',
+    odoo_api_key_enc: encrypt(body.odoo_api_key),
+    render_url: (body.render_url || '').replace(/\/+$/, ''),
+    render_api_key_enc: encrypt(body.render_api_key),
+    criado_em: body.criado_em || now,
+    atualizado_em: now,
+  };
+}
 
 // === Auth ===
 function apiKeyAuth(req, res, next) {
@@ -26,18 +134,6 @@ function apiKeyAuth(req, res, next) {
     return res.status(401).json({ erro: 'API key invalida' });
   }
   next();
-}
-
-// === JSON File Helpers ===
-function loadClientes() {
-  try {
-    if (!fs.existsSync(CLIENTES_FILE)) { fs.writeFileSync(CLIENTES_FILE, '[]'); return []; }
-    return JSON.parse(fs.readFileSync(CLIENTES_FILE, 'utf8'));
-  } catch { return []; }
-}
-
-function saveClientes(clientes) {
-  fs.writeFileSync(CLIENTES_FILE, JSON.stringify(clientes, null, 2));
 }
 
 // === Odoo XML-RPC Helpers (dinamicos, por cliente) ===
@@ -104,117 +200,121 @@ async function checkOdoo(cliente) {
 }
 
 // === GET — Listar todos os clientes ===
-router.get('/clientes', apiKeyAuth, (req, res) => {
-  const clientes = loadClientes();
-  // Nao retorna API keys na listagem
-  const safe = clientes.map(c => ({
-    id: c.id, nome: c.nome, cnpj: c.cnpj,
-    odoo_url: c.odoo_url, odoo_db: c.odoo_db, odoo_user: c.odoo_user,
-    render_url: c.render_url,
-    criado_em: c.criado_em, atualizado_em: c.atualizado_em,
-  }));
-  res.json({ clientes: safe });
+router.get('/clientes', apiKeyAuth, async (req, res) => {
+  try {
+    initFirebase();
+    if (!db) return res.status(500).json({ erro: 'Firebase nao configurado' });
+    const clientes = await getAllClientes();
+    const safe = clientes.map(safeFields);
+    res.json({ clientes: safe });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 // === POST — Criar cliente ===
-router.post('/clientes', apiKeyAuth, (req, res) => {
-  const { nome, cnpj, odoo_url, odoo_db, odoo_user, odoo_api_key, render_url, render_api_key } = req.body;
+router.post('/clientes', apiKeyAuth, async (req, res) => {
+  const { nome, cnpj } = req.body;
   if (!nome || !cnpj) return res.status(400).json({ erro: 'Nome e CNPJ sao obrigatorios' });
-
-  const clientes = loadClientes();
-  const id = 'cli_' + Date.now();
-  const novo = {
-    id, nome, cnpj: cnpj.replace(/\D/g, ''),
-    odoo_url: (odoo_url || '').replace(/\/+$/, ''),
-    odoo_db: odoo_db || '',
-    odoo_user: odoo_user || '',
-    odoo_api_key: odoo_api_key || '',
-    render_url: (render_url || '').replace(/\/+$/, ''),
-    render_api_key: render_api_key || '',
-    criado_em: new Date().toISOString(),
-    atualizado_em: new Date().toISOString(),
-  };
-  clientes.push(novo);
-  saveClientes(clientes);
-
-  // Retorna sem a API key por seguranca
-  const { odoo_api_key: _, render_api_key: __, ...safe } = novo;
-  res.json({ sucesso: true, cliente: safe });
+  try {
+    initFirebase();
+    if (!db) return res.status(500).json({ erro: 'Firebase nao configurado' });
+    const id = 'cli_' + Date.now();
+    const doc = clienteToDoc(req.body, id);
+    await db.collection(COLLECTION).doc(id).set(doc);
+    console.log('[ADMIN-CLIENTES] Cliente criado: ' + nome + ' (' + id + ')');
+    res.json({ sucesso: true, cliente: { id, ...safeFields(doc) } });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 // === PUT — Atualizar cliente ===
-router.put('/clientes/:id', apiKeyAuth, (req, res) => {
-  const clientes = loadClientes();
-  const idx = clientes.findIndex(c => c.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ erro: 'Cliente nao encontrado' });
+router.put('/clientes/:id', apiKeyAuth, async (req, res) => {
+  try {
+    initFirebase();
+    if (!db) return res.status(500).json({ erro: 'Firebase nao configurado' });
+    const existing = await getCliente(req.params.id);
+    if (!existing) return res.status(404).json({ erro: 'Cliente nao encontrado' });
 
-  const c = clientes[idx];
-  const allowed = ['nome', 'cnpj', 'odoo_url', 'odoo_db', 'odoo_user', 'odoo_api_key', 'render_url', 'render_api_key'];
-  for (const field of allowed) {
-    if (req.body[field] !== undefined) {
-      if (field === 'cnpj') c[field] = req.body[field].replace(/\D/g, '');
-      else if (field.includes('url')) c[field] = req.body[field].replace(/\/+$/, '');
-      else c[field] = req.body[field];
+    const allowed = ['nome', 'cnpj', 'odoo_url', 'odoo_db', 'odoo_user', 'odoo_api_key', 'render_url', 'render_api_key'];
+    for (const field of allowed) {
+      if (req.body[field] !== undefined) {
+        if (field === 'cnpj') existing[field] = req.body[field].replace(/\D/g, '');
+        else if (field.includes('url')) existing[field] = req.body[field].replace(/\/+$/, '');
+        else existing[field] = req.body[field];
+      }
     }
-  }
-  c.atualizado_em = new Date().toISOString();
-  clientes[idx] = c;
-  saveClientes(clientes);
+    existing.atualizado_em = new Date().toISOString();
 
-  const { odoo_api_key: _, render_api_key: __, ...safe } = c;
-  res.json({ sucesso: true, cliente: safe });
+    const doc = clienteToDoc(existing, existing.id);
+    doc.criado_em = existing.criado_em;
+    await db.collection(COLLECTION).doc(existing.id).set(doc);
+    console.log('[ADMIN-CLIENTES] Cliente atualizado: ' + existing.nome + ' (' + existing.id + ')');
+    res.json({ sucesso: true, cliente: safeFields(existing) });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 // === DELETE — Remover cliente ===
-router.delete('/clientes/:id', apiKeyAuth, (req, res) => {
-  let clientes = loadClientes();
-  const idx = clientes.findIndex(c => c.id === req.params.id);
-  if (idx === -1) return res.status(404).json({ erro: 'Cliente nao encontrado' });
-  const removido = clientes.splice(idx, 1)[0];
-  saveClientes(clientes);
-  res.json({ sucesso: true, nome: removido.nome });
+router.delete('/clientes/:id', apiKeyAuth, async (req, res) => {
+  try {
+    initFirebase();
+    if (!db) return res.status(500).json({ erro: 'Firebase nao configurado' });
+    const existing = await getCliente(req.params.id);
+    if (!existing) return res.status(404).json({ erro: 'Cliente nao encontrado' });
+    await db.collection(COLLECTION).doc(req.params.id).delete();
+    console.log('[ADMIN-CLIENTES] Cliente removido: ' + existing.nome + ' (' + req.params.id + ')');
+    res.json({ sucesso: true, nome: existing.nome });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 // === POST — Check status (Odoo + Render) ===
 router.post('/clientes/:id/check', apiKeyAuth, async (req, res) => {
-  const clientes = loadClientes();
-  const c = clientes.find(cl => cl.id === req.params.id);
-  if (!c) return res.status(404).json({ erro: 'Cliente nao encontrado' });
+  try {
+    initFirebase();
+    if (!db) return res.status(500).json({ erro: 'Firebase nao configurado' });
+    const c = await getCliente(req.params.id);
+    if (!c) return res.status(404).json({ erro: 'Cliente nao encontrado' });
 
-  const [odoo, render] = await Promise.all([
-    c.odoo_url && c.odoo_api_key ? checkOdoo(c) : Promise.resolve({ online: false, erro: 'Nao configurado' }),
-    c.render_url && c.render_api_key ? checkRender(c.render_url, c.render_api_key) : Promise.resolve({ online: false, erro: 'Nao configurado' }),
-  ]);
+    const [odoo, render] = await Promise.all([
+      c.odoo_url && c.odoo_api_key ? checkOdoo(c) : Promise.resolve({ online: false, erro: 'Nao configurado' }),
+      c.render_url && c.render_api_key ? checkRender(c.render_url, c.render_api_key) : Promise.resolve({ online: false, erro: 'Nao configurado' }),
+    ]);
 
-  res.json({ id: c.id, nome: c.nome, odoo, render, timestamp: new Date().toISOString() });
+    res.json({ id: c.id, nome: c.nome, odoo, render, timestamp: new Date().toISOString() });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 // === POST — Dashboard do cliente (NFS-e) ===
 router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
-  const clientes = loadClientes();
-  const c = clientes.find(cl => cl.id === req.params.id);
-  if (!c) return res.status(404).json({ erro: 'Cliente nao encontrado' });
-  if (!c.odoo_url || !c.odoo_api_key) return res.json({ conectado_odoo: false, erro: 'Credenciais Odoo nao configuradas', nfses: [], resumo: {} });
-
   try {
+    initFirebase();
+    if (!db) return res.status(500).json({ erro: 'Firebase nao configurado' });
+    const c = await getCliente(req.params.id);
+    if (!c) return res.status(404).json({ erro: 'Cliente nao encontrado' });
+    if (!c.odoo_url || !c.odoo_api_key) return res.json({ conectado_odoo: false, erro: 'Credenciais Odoo nao configuradas', nfses: [], resumo: {} });
+
     const client = createClient(c.odoo_url);
     if (!client) return res.json({ conectado_odoo: false, erro: 'URL invalida', nfses: [], resumo: {} });
     const uid = await authenticate(client, c.odoo_db, c.odoo_user, c.odoo_api_key);
     const db = c.odoo_db;
     const apiKey = c.odoo_api_key;
 
-    // Detecta o prefixo dos campos (x_nytro_, x_accel_, x_ajl_ etc) — tenta x_nytro_ primeiro
+    // Detecta o prefixo dos campos (x_nytro_, x_accel_, x_ajl_ etc)
     const prefixos = ['x_nytro_', 'x_accel_', 'x_ajl_'];
     let prefixo = '';
 
-    // Busca faturas com qualquer prefixo
     const moveIdsAll = await executeKw(client, db, uid, apiKey, 'account.move', 'search', [
       ['move_type', '=', 'out_invoice'],
     ], { order: 'id desc', limit: 200 });
 
-    // Tenta descobrir qual prefixo o cliente usa
     if (moveIdsAll.length > 0) {
-      // Le 1 fatura para ver campos disponiveis
       const sampleFields = await executeKw(client, db, uid, apiKey, 'ir.model.fields', 'search_read',
         [['model', '=', 'account.move'], ['name', 'like', 'x_%nfse_status']],
         { fields: ['name'], limit: 5 }
@@ -225,7 +325,6 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
           if (fname.startsWith(p)) { prefixo = p; break; }
         }
         if (!prefixo) {
-          // Extrai prefixo generico: tudo antes de 'nfse_status'
           const match = fname.match(/^(x_[a-z]+_)/);
           if (match) prefixo = match[1];
         }
@@ -247,7 +346,6 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
       'state', 'create_date', 'write_date',
     ];
 
-    // Filtra campos que realmente existem
     const camposExistentes = await executeKw(client, db, uid, apiKey, 'ir.model.fields', 'search_read',
       [['model', '=', 'account.move'], ['name', 'in', camposMove]],
       { fields: ['name'] }
@@ -255,7 +353,6 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
     const existentes = new Set(camposExistentes.map(f => f.name));
     const camposValidos = camposMove.filter(cf => existentes.has(cf));
 
-    // Se tem campo de status, filtra por ele; senao pega todas out_invoice
     let moveIds = moveIdsAll;
     if (existentes.has(statusField)) {
       moveIds = await executeKw(client, db, uid, apiKey, 'account.move', 'search', [
@@ -274,7 +371,6 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
 
     const moves = await executeKw(client, db, uid, apiKey, 'account.move', 'read', [moveIds], { fields: camposValidos });
 
-    // Partners
     const partnerIds = [...new Set(moves.filter(m => m.partner_id).map(m => m.partner_id[0]))];
     let partners = {};
     if (partnerIds.length) {
@@ -289,7 +385,6 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
       partnerData.forEach(p => { partners[p.id] = p; });
     }
 
-    // Monta lista
     const nfses = moves.map(m => {
       const partner = partners[m.partner_id?.[0]] || {};
       const statusVal = m[statusField] || '';
@@ -339,18 +434,18 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
 
 // === GET — Produtos do cliente ===
 router.get('/clientes/:id/produtos', apiKeyAuth, async (req, res) => {
-  const clientes = loadClientes();
-  const c = clientes.find(cl => cl.id === req.params.id);
-  if (!c) return res.status(404).json({ erro: 'Cliente nao encontrado' });
-  if (!c.odoo_url || !c.odoo_api_key) return res.json({ erro: 'Credenciais Odoo nao configuradas', produtos: [] });
-
   try {
+    initFirebase();
+    if (!db) return res.status(500).json({ erro: 'Firebase nao configurado' });
+    const c = await getCliente(req.params.id);
+    if (!c) return res.status(404).json({ erro: 'Cliente nao encontrado' });
+    if (!c.odoo_url || !c.odoo_api_key) return res.json({ erro: 'Credenciais Odoo nao configuradas', produtos: [] });
+
     const client = createClient(c.odoo_url);
     const uid = await authenticate(client, c.odoo_db, c.odoo_user, c.odoo_api_key);
     const db = c.odoo_db;
     const apiKey = c.odoo_api_key;
 
-    // Descobre prefixo
     const sampleFields = await executeKw(client, db, uid, apiKey, 'ir.model.fields', 'search_read',
       [['model', '=', 'product.product'], ['name', 'like', 'x_%codigo_tributacao']],
       { fields: ['name'], limit: 5 }
