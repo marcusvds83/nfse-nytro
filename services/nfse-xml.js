@@ -22,6 +22,7 @@
  *
  * TCEndereco ordem:
  *   endNac/endExt, xLgr, nro, [xCpl], xBairro
+ *   (endNac requer cMun e CEP — CEP obrigatorio)
  *
  * Namespace: http://www.sped.fazenda.gov.br/nfse
  */
@@ -128,8 +129,13 @@ function escXml(s) {
 
 /** Gera bloco de endereco (TCEndereco) - ordem XSD: endNac/endExt, xLgr, nro, [xCpl], xBairro */
 function xmlEndereco(cMun, cep, xLgr, nro, xBairro, xCpl) {
+  // CEP e obrigatorio no XSD dentro de endNac — sem CEP, omite o endereco inteiro
+  if (!cep) {
+    console.warn('[NFSE-XML] CEP ausente — endereco omitido do XML (logradouro: ' + (xLgr || 'n/a') + ')');
+    return '';
+  }
   let s = `\n        <end>\n          <endNac>\n            <cMun>${cMun}</cMun>`;
-  if (cep) s += `\n            <CEP>${cep}</CEP>`;
+  s += `\n            <CEP>${cep}</CEP>`;
   s += `\n          </endNac>`;
   s += `\n          <xLgr>${escXml(xLgr)}</xLgr>`;
   s += `\n          <nro>${escXml(nro)}</nro>`;
