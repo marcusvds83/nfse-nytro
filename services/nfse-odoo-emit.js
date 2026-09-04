@@ -63,10 +63,14 @@ function readFields(client, db, uid, model, ids, fields) {
  * Retorna apenas os campos existentes.
  */
 async function filtrarCamposExistentes(client, db, uid, modelo, camposDesejados) {
-  const camposModelo = await executeKw(client, db, uid, 'ir.model.fields', 'search_read',
+  // Odoo 19: search+read em vez de search_read
+  const fieldIds = await executeKw(client, db, uid, 'ir.model.fields', 'search',
     [[['model', '=', modelo], ['name', 'in', camposDesejados]]],
-    { fields: ['name'] }
+    { limit: camposDesejados.length }
   );
+  const camposModelo = fieldIds.length
+    ? await executeKw(client, db, uid, 'ir.model.fields', 'read', [fieldIds], { fields: ['name'] })
+    : [];
   const existentes = new Set(camposModelo.map(f => f.name));
   const validos = camposDesejados.filter(c => existentes.has(c));
   const faltantes = camposDesejados.filter(c => !existentes.has(c));

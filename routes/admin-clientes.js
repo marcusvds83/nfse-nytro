@@ -291,6 +291,40 @@ router.post('/clientes/:id/check', apiKeyAuth, async (req, res) => {
   }
 });
 
+// === Odoo 19 compat helpers ===
+// search_read quebra no Odoo 19 ('got multiple values for argument fields').
+// Usamos search + read em vez de search_read.
+// IMPORTANTE: em execute_kw, args = lista de args posicionais do metodo.
+// Para search: args = [domain] onde domain = [[cond1], [cond2], ...]
+// Para read:   args = [ids]   onde ids   = [id1, id2, ...]
+async function odooSearch(client, odooDb, uid, apiKey, model, domain, kwargs) {
+  const ids = await executeKw(client, odooDb, uid, apiKey, model, 'search', [domain], kwargs || {});
+  return ids || [];
+}
+
+async function odooRead(client, odooDb, uid, apiKey, model, ids, fields) {
+  if (!ids || !ids.length) return [];
+  return executeKw(client, odooDb, uid, apiKey, model, 'read', [ids], { fields });
+}
+
+async function odooSearchRead(client, odooDb, uid, apiKey, model, domain, fields, kwargs) {
+  const ids = await odooSearch(client, odooDb, uid, apiKey, model, domain, kwargs);
+  return odooRead(client, odooDb, uid, apiKey, model, ids, fields);
+}
+
+async function odooSearchCount(client, odooDb, uid, apiKey, model, domain) {
+  return executeKw(client, odooDb, uid, apiKey, model, 'search_count', [domain]);
+}
+
+async function odooFieldsExist(client, odooDb, uid, apiKey, model, fieldNames) {
+  // Retorna Set com nomes dos campos que realmente existem no modelo
+  const domain = [['model', '=', model], ['name', 'in', fieldNames]];
+  const ids = await executeKw(client, odooDb, uid, apiKey, 'ir.model.fields', 'search', [domain], { limit: fieldNames.length });
+  if (!ids || !ids.length) return new Set();
+  const fields = await executeKw(client, odooDb, uid, apiKey, 'ir.model.fields', 'read', [ids], { fields: ['name'] });
+  return new Set(fields.map(f => f.name));
+}
+
 // === POST — Dashboard do cliente (NFS-e) ===
 router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
   try {
@@ -303,34 +337,38 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
     const client = createClient(c.odoo_url);
     if (!client) return res.json({ conectado_odoo: false, erro: 'URL invalida', nfses: [], resumo: {} });
     const uid = await authenticate(client, c.odoo_db, c.odoo_user, c.odoo_api_key);
-    const db = c.odoo_db;
+    const odooDb = c.odoo_db;
     const apiKey = c.odoo_api_key;
 
-    // Detecta campos NFS-e — suporta 2 padroes:
-    //   1) Nytro/Accel/AJL: x_nytro_nfse_status, x_accel_nfse_status, x_ajl_nfse_status
-    //   2) SIEG: x_nfse_status_emissao (sem prefixo de empresa)
-    // Tambem mapeia campos de forma generica: status, numero, cod_verif, protocolo, data, erro, msg, xml
+    // Detecta campos NFS-e — suporta 3 padroes:
+    //   1) SIEG/Accel: x_nfse_status_emissao, x_nfse_numero, ... (sem prefixo de empresa)
+    //   2) Nytro: x_nytro_nfse_status, x_nytro_nfse_numero, ...
+    //   3) AJL: x_ajl_nfse_status, x_ajl_nfse_numero, ...
+    //
+    // Quando multiplos existem (e.g. Accel tem x_nfse_* E x_nytro_*),
+    // preferimos x_nfse_* (campos nativos do cliente) sobre x_nytro_* (campos de compat).
 
-    // Busca TODOS os campos de status NFS-e disponiveis
     const statusCandidates = [
-      'x_nytro_nfse_status', 'x_accel_nfse_status', 'x_ajl_nfse_status',
-      'x_nfse_status_emissao', 'x_nfse_nfse_status',
+      'x_nfse_status_emissao', 'x_nytro_nfse_status',
+      'x_accel_nfse_status', 'x_ajl_nfse_status', 'x_nfse_nfse_status',
     ];
-    const existingStatusFields = await executeKw(client, db, uid, apiKey, 'ir.model.fields', 'search_read',
-      [['model', '=', 'account.move'], ['name', 'in', statusCandidates]],
-      { fields: ['name'], limit: 5 }
-    );
+    const foundStatusSet = await odooFieldsExist(client, odooDb, uid, apiKey, 'account.move', statusCandidates);
 
-    // Escolhe o primeiro disponivel (prioridade: x_nytro_ > x_accel_ > x_ajl_ > x_nfse_status_emissao)
+    // Seleciona status field com prioridade: x_nfse_ > x_nytro_ > x_accel_ > x_ajl_
     let statusField = '';
-    let fieldMap = {}; // mapeia nomes genericos -> nomes reais no Odoo
+    for (const candidate of statusCandidates) {
+      if (foundStatusSet.has(candidate)) {
+        statusField = candidate;
+        break;
+      }
+    }
+
+    let fieldMap = {};
     let prefixo = '';
 
-    if (existingStatusFields.length > 0) {
-      statusField = existingStatusFields[0].name;
-
-      if (statusField.startsWith('x_nfse_status_emissao')) {
-        // Padrao SIEG: x_nfse_*
+    if (statusField) {
+      if (statusField === 'x_nfse_status_emissao') {
+        // Padrao SIEG/Accel: x_nfse_*
         prefixo = 'x_nfse_';
         fieldMap = {
           status: 'x_nfse_status_emissao',
@@ -361,33 +399,16 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
 
     console.log('[ADMIN-CLIENTES] Cliente ' + c.nome + ': statusField=' + statusField + ' prefixo=' + prefixo);
 
-    const moveIdsAll = await executeKw(client, db, uid, apiKey, 'account.move', 'search', [
-      ['move_type', '=', 'out_invoice'],
-    ], { order: 'id desc', limit: 200 });
-
-    const camposMove = [
-      'name', 'partner_id', 'company_id', 'invoice_date',
-      'amount_total', 'amount_untaxed', 'amount_tax',
-      ...Object.values(fieldMap),
-      'state', 'create_date', 'write_date',
-    ];
-
-    const camposExistentes = await executeKw(client, db, uid, apiKey, 'ir.model.fields', 'search_read',
-      [['model', '=', 'account.move'], ['name', 'in', camposMove]],
-      { fields: ['name'] }
-    );
-    const existentes = new Set(camposExistentes.map(f => f.name));
-    const camposValidos = camposMove.filter(cf => existentes.has(cf));
-
-    let moveIds = moveIdsAll;
-    if (statusField && existentes.has(statusField)) {
-      moveIds = await executeKw(client, db, uid, apiKey, 'account.move', 'search', [
-        ['move_type', '=', 'out_invoice'],
-        [statusField, '!=', false],
-      ], { order: 'id desc', limit: 200 });
+    // Busca moves com NFS-e
+    const baseDomain = [['move_type', '=', 'out_invoice']];
+    let searchDomain = baseDomain;
+    if (statusField) {
+      searchDomain = [['move_type', '=', 'out_invoice'], [statusField, '!=', false]];
     }
 
-    if (!moveIds || !moveIds.length) {
+    const moveIds = await odooSearch(client, odooDb, uid, apiKey, 'account.move', searchDomain, { order: 'id desc', limit: 200 });
+
+    if (!moveIds.length) {
       return res.json({
         conectado_odoo: true, cliente_nome: c.nome, cliente_cnpj: c.cnpj,
         prefixo, nfses: [], resumo: { total: 0 },
@@ -395,19 +416,26 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
       });
     }
 
-    const moves = await executeKw(client, db, uid, apiKey, 'account.move', 'read', [moveIds], { fields: camposValidos });
+    // Verifica quais campos realmente existem no modelo
+    const camposMove = [
+      'name', 'partner_id', 'company_id', 'invoice_date',
+      'amount_total', 'amount_untaxed', 'amount_tax',
+      ...Object.values(fieldMap),
+      'state', 'create_date', 'write_date',
+    ];
+    const camposExistentes = await odooFieldsExist(client, odooDb, uid, apiKey, 'account.move', camposMove);
+    const camposValidos = camposMove.filter(cf => camposExistentes.has(cf));
 
+    const moves = await odooRead(client, odooDb, uid, apiKey, 'account.move', moveIds, camposValidos);
+
+    // Busca dados dos parceiros
     const partnerIds = [...new Set(moves.filter(m => m.partner_id).map(m => m.partner_id[0]))];
     let partners = {};
     if (partnerIds.length) {
       const cpFields = ['name', 'city', 'state_id', 'vat', 'cnpj_cpf', 'country_code'];
-      const cpExistentes = await executeKw(client, db, uid, apiKey, 'ir.model.fields', 'search_read',
-        [['model', '=', 'res.partner'], ['name', 'in', cpFields]],
-        { fields: ['name'] }
-      );
-      const cpSet = new Set(cpExistentes.map(f => f.name));
-      const cpValidos = cpFields.filter(cf => cpSet.has(cf));
-      const partnerData = await executeKw(client, db, uid, apiKey, 'res.partner', 'read', [partnerIds], { fields: cpValidos });
+      const cpExistentes = await odooFieldsExist(client, odooDb, uid, apiKey, 'res.partner', cpFields);
+      const cpValidos = cpFields.filter(cf => cpExistentes.has(cf));
+      const partnerData = await odooRead(client, odooDb, uid, apiKey, 'res.partner', partnerIds, cpValidos);
       partnerData.forEach(p => { partners[p.id] = p; });
     }
 
@@ -463,6 +491,7 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (err) {
+    console.error('[ADMIN-CLIENTES] Dashboard erro:', err.message);
     res.status(500).json({ conectado_odoo: false, erro: err.message, nfses: [], resumo: {} });
   }
 });
@@ -478,13 +507,15 @@ router.get('/clientes/:id/produtos', apiKeyAuth, async (req, res) => {
 
     const client = createClient(c.odoo_url);
     const uid = await authenticate(client, c.odoo_db, c.odoo_user, c.odoo_api_key);
-    const db = c.odoo_db;
+    const odooDb = c.odoo_db;
     const apiKey = c.odoo_api_key;
 
-    const sampleFields = await executeKw(client, db, uid, apiKey, 'ir.model.fields', 'search_read',
-      [['model', '=', 'product.product'], ['name', 'like', 'x_%codigo_tributacao']],
-      { fields: ['name'], limit: 5 }
-    );
+    // Detecta prefixo de campos via search+read (Odoo 19 compat)
+    const sampleDomain = [['model', '=', 'product.product'], ['name', 'like', 'x_%codigo_tributacao']];
+    const sampleIds = await executeKw(client, odooDb, uid, apiKey, 'ir.model.fields', 'search', [sampleDomain], { limit: 5 });
+    const sampleFields = sampleIds.length
+      ? await executeKw(client, odooDb, uid, apiKey, 'ir.model.fields', 'read', [sampleIds], { fields: ['name'] })
+      : [];
     let prefixo = '';
     if (sampleFields.length > 0) {
       const match = sampleFields[0].name.match(/^(x_[a-z]+_)/);
@@ -492,33 +523,27 @@ router.get('/clientes/:id/produtos', apiKeyAuth, async (req, res) => {
     }
 
     const camposNytro = [prefixo + 'codigo_tributacao', prefixo + 'c_nbs', prefixo + 'aliquota_iss', prefixo + 'iss_retido', prefixo + 'descricao_nfse'];
+    const camposExistentesSet = await odooFieldsExist(client, odooDb, uid, apiKey, 'product.product', camposNytro);
+    const camposExistentesList = camposNytro.filter(cf => camposExistentesSet.has(cf));
 
-    const camposExistentes = await executeKw(client, db, uid, apiKey, 'ir.model.fields', 'search_read',
-      [['model', '=', 'product.product'], ['name', 'in', camposNytro]],
-      { fields: ['name', 'field_type', 'ttype'] }
-    );
+    // Busca produtos via search+read (Odoo 19 compat)
+    const produtoIds = await odooSearch(client, odooDb, uid, apiKey, 'product.product', [['sale_ok', '=', true]], { limit: 100, order: 'name asc' });
+    const produtos = await odooRead(client, odooDb, uid, apiKey, 'product.product', produtoIds, ['id', 'name', 'default_code', 'list_price']);
 
-    const produtos = await executeKw(client, db, uid, apiKey, 'product.product', 'search_read',
-      [['sale_ok', '=', true]],
-      { fields: ['id', 'name', 'default_code', 'list_price'], limit: 100, order: 'name asc' }
-    );
-
-    if (camposExistentes.length > 0 && produtos.length > 0) {
-      const campoNames = camposExistentes.map(f => f.name);
-      const camposProduto = await executeKw(client, db, uid, apiKey, 'product.product', 'read',
-        [produtos.map(p => p.id)], { fields: campoNames }
-      );
+    if (camposExistentesList.length > 0 && produtos.length > 0) {
+      const camposProduto = await odooRead(client, odooDb, uid, apiKey, 'product.product', produtos.map(p => p.id), camposExistentesList);
       const prodMap = {};
       camposProduto.forEach(p => { prodMap[p.id] = p; });
       produtos.forEach(p => {
         const data = prodMap[p.id] || {};
         p.x_nytro = {};
-        campoNames.forEach(cn => { p.x_nytro[cn] = data[cn] || ''; });
+        camposExistentesList.forEach(cn => { p.x_nytro[cn] = data[cn] || ''; });
       });
     }
 
-    res.json({ produtos, campos_disponiveis: camposExistentes.map(f => f.name), prefixo });
+    res.json({ produtos, campos_disponiveis: camposExistentesList, prefixo });
   } catch (err) {
+    console.error('[ADMIN-CLIENTES] Produtos erro:', err.message);
     res.status(500).json({ erro: err.message, produtos: [] });
   }
 });

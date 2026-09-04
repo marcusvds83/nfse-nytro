@@ -298,10 +298,13 @@ router.post('/admin/impostos/push', apiKeyAuth, async (req, res) => {
     // 2. Atualiza produtos com campos de impostos
     if (req.body.produto_ids && req.body.produto_ids.length > 0) {
       const camposProduto = {};
-      const camposDisponiveis = await executeKw(client, db, uid, 'ir.model.fields', 'search_read',
-        [['model', '=', 'product.product'], ['name', 'in', ['x_nytro_codigo_tributacao', 'x_nytro_c_nbs', 'x_nytro_aliquota_iss', 'x_nytro_iss_retido', 'x_nytro_descricao_nfse']]],
-        { fields: ['name'] }
+      // Odoo 19: search+read em vez de search_read
+      const camposAvailIds = await executeKw(client, db, uid, 'ir.model.fields', 'search',
+        [['model', '=', 'product.product'], ['name', 'in', ['x_nytro_codigo_tributacao', 'x_nytro_c_nbs', 'x_nytro_aliquota_iss', 'x_nytro_iss_retido', 'x_nytro_descricao_nfse']]]
       );
+      const camposDisponiveis = camposAvailIds.length
+        ? await executeKw(client, db, uid, 'ir.model.fields', 'read', [camposAvailIds], { fields: ['name'] })
+        : [];
       const cpSet = new Set(camposDisponiveis.map(f => f.name));
 
       if (cpSet.has('x_nytro_codigo_tributacao') && codigo_tributacao) camposProduto.x_nytro_codigo_tributacao = codigo_tributacao;
@@ -331,15 +334,21 @@ router.get('/admin/impostos/produtos', apiKeyAuth, async (req, res) => {
     const db = config.odoo.db;
 
     // Verifica se campos x_nytro existem
-    const camposExistentes = await executeKw(client, db, uid, 'ir.model.fields', 'search_read',
-      [['model', '=', 'product.product'], ['name', 'like', 'x_nytro_%']],
-      { fields: ['name', 'field_type', 'ttype'] }
+    // Odoo 19: search+read em vez de search_read
+    const camposExistIds = await executeKw(client, db, uid, 'ir.model.fields', 'search',
+      [['model', '=', 'product.product'], ['name', 'like', 'x_nytro_%']]
     );
+    const camposExistentes = camposExistIds.length
+      ? await executeKw(client, db, uid, 'ir.model.fields', 'read', [camposExistIds], { fields: ['name', 'field_type', 'ttype'] })
+      : [];
 
-    const produtos = await executeKw(client, db, uid, 'product.product', 'search_read',
+    const produtoIds = await executeKw(client, db, uid, 'product.product', 'search',
       [['sale_ok', '=', true]],
-      { fields: ['id', 'name', 'default_code', 'list_price'], limit: 100, order: 'name asc' }
+      { limit: 100, order: 'name asc' }
     );
+    const produtos = produtoIds.length
+      ? await executeKw(client, db, uid, 'product.product', 'read', [produtoIds], { fields: ['id', 'name', 'default_code', 'list_price'] })
+      : [];
 
     // Traz valores atuais dos campos x_nytro
     if (camposExistentes.length > 0 && produtos.length > 0) {

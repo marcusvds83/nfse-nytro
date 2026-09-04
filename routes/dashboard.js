@@ -106,12 +106,15 @@ router.get('/dashboard', apiKeyAuth, async (req, res) => {
       'state', 'create_date', 'write_date',
     ];
 
-    // Descobrir campos existentes
-    const camposExistentes = await executeKw(client, db, uid, 'ir.model.fields', 'search_read',
+    // Descobrir campos existentes (Odoo 19: search+read em vez de search_read)
+    const camposSearchIds = await executeKw(client, db, uid, 'ir.model.fields', 'search',
       [[['model', '=', 'account.move'], ['name', 'in', camposMove]]],
-      { fields: ['name'] }
+      { limit: camposMove.length }
     );
-    const existentes = new Set(camposExistentes.map(f => f.name));
+    const camposExistentesData = camposSearchIds.length
+      ? await executeKw(client, db, uid, 'ir.model.fields', 'read', [camposSearchIds], { fields: ['name'] })
+      : [];
+    const existentes = new Set(camposExistentesData.map(f => f.name));
     const camposValidos = camposMove.filter(c => existentes.has(c));
 
     const moves = await executeKw(client, db, uid, 'account.move', 'read', [moveIds], { fields: camposValidos });
@@ -121,11 +124,15 @@ router.get('/dashboard', apiKeyAuth, async (req, res) => {
     let partners = {};
     if (partnerIds.length) {
       const camposPartner = ['name', 'city', 'state_id', 'vat', 'cnpj_cpf', 'country_code'];
-      const cpExistentes = await executeKw(client, db, uid, 'ir.model.fields', 'search_read',
+      // Odoo 19: search+read em vez de search_read
+      const cpSearchIds = await executeKw(client, db, uid, 'ir.model.fields', 'search',
         [[['model', '=', 'res.partner'], ['name', 'in', camposPartner]]],
-        { fields: ['name'] }
+        { limit: camposPartner.length }
       );
-      const cpSet = new Set(cpExistentes.map(f => f.name));
+      const cpExistentesData = cpSearchIds.length
+        ? await executeKw(client, db, uid, 'ir.model.fields', 'read', [cpSearchIds], { fields: ['name'] })
+        : [];
+      const cpSet = new Set(cpExistentesData.map(f => f.name));
       const cpValidos = camposPartner.filter(c => cpSet.has(c));
       const partnerData = await executeKw(client, db, uid, 'res.partner', 'read', [partnerIds], { fields: cpValidos });
       partnerData.forEach(p => { partners[p.id] = p; });
@@ -136,11 +143,15 @@ router.get('/dashboard', apiKeyAuth, async (req, res) => {
     let empresa = null;
     if (companyId) {
       const camposCompanyDesejados = ['name', 'city', 'state_id', 'vat', 'cnpj_cpf', 'company_registry', 'x_nytro_nfse_dados_prestador_im', 'x_nytro_nfse_numero'];
-      const ccExistentes = await executeKw(client, db, uid, 'ir.model.fields', 'search_read',
+      // Odoo 19: search+read em vez de search_read
+      const ccSearchIds = await executeKw(client, db, uid, 'ir.model.fields', 'search',
         [[['model', '=', 'res.company'], ['name', 'in', camposCompanyDesejados]]],
-        { fields: ['name'] }
+        { limit: camposCompanyDesejados.length }
       );
-      const ccSet = new Set(ccExistentes.map(f => f.name));
+      const ccExistentesData = ccSearchIds.length
+        ? await executeKw(client, db, uid, 'ir.model.fields', 'read', [ccSearchIds], { fields: ['name'] })
+        : [];
+      const ccSet = new Set(ccExistentesData.map(f => f.name));
       const ccValidos = camposCompanyDesejados.filter(c => ccSet.has(c));
       const empresas = await executeKw(client, db, uid, 'res.company', 'read', [[companyId]], { fields: ccValidos });
       if (empresas.length) empresa = empresas[0];
