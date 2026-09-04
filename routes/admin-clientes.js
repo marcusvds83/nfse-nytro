@@ -306,43 +306,69 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
     const db = c.odoo_db;
     const apiKey = c.odoo_api_key;
 
-    // Detecta o prefixo dos campos (x_nytro_, x_accel_, x_ajl_ etc)
-    const prefixos = ['x_nytro_', 'x_accel_', 'x_ajl_'];
+    // Detecta campos NFS-e — suporta 2 padroes:
+    //   1) Nytro/Accel/AJL: x_nytro_nfse_status, x_accel_nfse_status, x_ajl_nfse_status
+    //   2) SIEG: x_nfse_status_emissao (sem prefixo de empresa)
+    // Tambem mapeia campos de forma generica: status, numero, cod_verif, protocolo, data, erro, msg, xml
+
+    // Busca TODOS os campos de status NFS-e disponiveis
+    const statusCandidates = [
+      'x_nytro_nfse_status', 'x_accel_nfse_status', 'x_ajl_nfse_status',
+      'x_nfse_status_emissao', 'x_nfse_nfse_status',
+    ];
+    const existingStatusFields = await executeKw(client, db, uid, apiKey, 'ir.model.fields', 'search_read',
+      [['model', '=', 'account.move'], ['name', 'in', statusCandidates]],
+      { fields: ['name'], limit: 5 }
+    );
+
+    // Escolhe o primeiro disponivel (prioridade: x_nytro_ > x_accel_ > x_ajl_ > x_nfse_status_emissao)
+    let statusField = '';
+    let fieldMap = {}; // mapeia nomes genericos -> nomes reais no Odoo
     let prefixo = '';
+
+    if (existingStatusFields.length > 0) {
+      statusField = existingStatusFields[0].name;
+
+      if (statusField.startsWith('x_nfse_status_emissao')) {
+        // Padrao SIEG: x_nfse_*
+        prefixo = 'x_nfse_';
+        fieldMap = {
+          status: 'x_nfse_status_emissao',
+          numero: 'x_nfse_numero',
+          codigo_verificacao: 'x_nfse_codigo_verificacao',
+          protocolo: 'x_nfse_protocolo',
+          data_emissao: 'x_nfse_data_emissao',
+          erro: 'x_nfse_mensagem',
+          mensagem: 'x_nfse_mensagem',
+          xml: 'x_nfse_xml_envio',
+        };
+      } else {
+        // Padrao Nytro/Accel/AJL: x_{empresa}_nfse_*
+        const match = statusField.match(/^(x_[a-z]+_)/);
+        prefixo = match ? match[1] : 'x_nytro_';
+        fieldMap = {
+          status: prefixo + 'nfse_status',
+          numero: prefixo + 'nfse_numero',
+          codigo_verificacao: prefixo + 'nfse_codigo_verificacao',
+          protocolo: prefixo + 'nfse_protocolo',
+          data_emissao: prefixo + 'nfse_data_emissao',
+          erro: prefixo + 'nfse_erro',
+          mensagem: prefixo + 'nfse_mensagem',
+          xml: prefixo + 'nfse_xml',
+        };
+      }
+    }
+
+    console.log('[ADMIN-CLIENTES] Cliente ' + c.nome + ': statusField=' + statusField + ' prefixo=' + prefixo);
 
     const moveIdsAll = await executeKw(client, db, uid, apiKey, 'account.move', 'search', [
       ['move_type', '=', 'out_invoice'],
     ], { order: 'id desc', limit: 200 });
 
-    if (moveIdsAll.length > 0) {
-      const sampleFields = await executeKw(client, db, uid, apiKey, 'ir.model.fields', 'search_read',
-        [['model', '=', 'account.move'], ['name', 'like', 'x_%nfse_status']],
-        { fields: ['name'], limit: 5 }
-      );
-      if (sampleFields.length > 0) {
-        const fname = sampleFields[0].name;
-        for (const p of prefixos) {
-          if (fname.startsWith(p)) { prefixo = p; break; }
-        }
-        if (!prefixo) {
-          const match = fname.match(/^(x_[a-z]+_)/);
-          if (match) prefixo = match[1];
-        }
-      }
-    }
-
-    const statusField = prefixo + 'nfse_status';
     const camposMove = [
       'name', 'partner_id', 'company_id', 'invoice_date',
       'amount_total', 'amount_untaxed', 'amount_tax',
-      statusField,
-      prefixo + 'nfse_numero',
-      prefixo + 'nfse_codigo_verificacao',
-      prefixo + 'nfse_protocolo',
-      prefixo + 'nfse_data_emissao',
-      prefixo + 'nfse_erro',
-      prefixo + 'nfse_mensagem',
-      prefixo + 'nfse_xml',
+      ...Object.values(fieldMap),
       'state', 'create_date', 'write_date',
     ];
 
@@ -354,7 +380,7 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
     const camposValidos = camposMove.filter(cf => existentes.has(cf));
 
     let moveIds = moveIdsAll;
-    if (existentes.has(statusField)) {
+    if (statusField && existentes.has(statusField)) {
       moveIds = await executeKw(client, db, uid, apiKey, 'account.move', 'search', [
         ['move_type', '=', 'out_invoice'],
         [statusField, '!=', false],
@@ -385,9 +411,18 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
       partnerData.forEach(p => { partners[p.id] = p; });
     }
 
+    // Normaliza status: SIEG usa 'rejeitada'/'transmitida', Nytro usa 'erro'/'processando'
+    function normalizarStatus(val) {
+      if (!val) return '';
+      const v = String(val).toLowerCase().trim();
+      if (v === 'transmitida') return 'autorizada';
+      if (v === 'rejeitada') return 'erro';
+      return v; // pendente, autorizada, cancelada, erro, processando, cancelar_solicitado
+    }
+
     const nfses = moves.map(m => {
       const partner = partners[m.partner_id?.[0]] || {};
-      const statusVal = m[statusField] || '';
+      const statusVal = normalizarStatus(m[fieldMap.status] || '');
       return {
         id: m.id, fatura: m.name,
         parceiro: partner.name || m.partner_id?.[1] || 'N/A',
@@ -399,13 +434,13 @@ router.post('/clientes/:id/dashboard', apiKeyAuth, async (req, res) => {
         valor_impostos: m.amount_tax || 0,
         data_fatura: m.invoice_date || '',
         status_nfse: statusVal,
-        numero_nfse: m[prefixo + 'nfse_numero'] || '',
-        chave_acesso: m[prefixo + 'nfse_codigo_verificacao'] || '',
-        protocolo: m[prefixo + 'nfse_protocolo'] || '',
-        data_emissao: m[prefixo + 'nfse_data_emissao'] || '',
-        erro: m[prefixo + 'nfse_erro'] || false,
-        mensagem: m[prefixo + 'nfse_mensagem'] || '',
-        tem_xml: !!(m[prefixo + 'nfse_xml'] && m[prefixo + 'nfse_xml'].length > 50),
+        numero_nfse: m[fieldMap.numero] || '',
+        chave_acesso: m[fieldMap.codigo_verificacao] || '',
+        protocolo: m[fieldMap.protocolo] || '',
+        data_emissao: m[fieldMap.data_emissao] || '',
+        erro: m[fieldMap.erro] || false,
+        mensagem: m[fieldMap.mensagem] || '',
+        tem_xml: !!(m[fieldMap.xml] && m[fieldMap.xml].length > 50),
         estado_fatura: m.state || '',
         criado_em: m.create_date || '',
         atualizado_em: m.write_date || '',
